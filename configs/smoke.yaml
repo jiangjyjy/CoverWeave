@@ -1,0 +1,23 @@
+N: 12
+lambda_values: [0.6, 1.0, 1.5]
+train_depths: [2, 3, 4]
+test_depths: [5, 8]
+graph_seeds: 3
+model_seeds: 1
+seed_base: 20260806
+seed: 1
+train_samples: 9
+valid_samples: 2
+test_samples: 2
+epochs: 2
+batch_size: 32
+d_model: 128
+nhead: 4
+num_layers: 2
+dim_feedforward: 512
+dropout: 0.1
+learning_rate: 0.001
+weight_decay: 0.01
+grad_clip: 1.0
+action_budget: 24
+device: cuda

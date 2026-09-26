@@ -5,11 +5,19 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON="${PYTHON:-python3}"
 CONFIG_INPUT="${1:-configs/smoke.yaml}"
 
+RECORD_GIT="${RECORD_GIT:-0}"
+
 cd "$PROJECT_DIR"
 command -v "$PYTHON" >/dev/null 2>&1 || { printf 'Python executable not found: %s\n' "$PYTHON" >&2; exit 1; }
 [[ -f "$CONFIG_INPUT" ]] || { printf 'missing config: %s\n' "$CONFIG_INPUT" >&2; exit 1; }
-CONFIG_PATH="$(cd "$(dirname "$CONFIG_INPUT")" && pwd)/$(basename "$CONFIG_INPUT")"
-RUN_DIR="$PROJECT_DIR/artifacts/sft-smoke/$(date -u +%Y%m%dT%H%M%SZ)"
+
+case "$CONFIG_INPUT" in
+    "$PROJECT_DIR"/*) CONFIG_LABEL="${CONFIG_INPUT#"$PROJECT_DIR"/}" ;;
+    /*)               CONFIG_LABEL="$(basename "$CONFIG_INPUT")" ;;
+    *)                CONFIG_LABEL="$CONFIG_INPUT" ;;
+esac
+
+RUN_DIR="artifacts/sft-smoke/$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$RUN_DIR"
 LOG_PATH="$RUN_DIR/bash.log"
 COMMANDS_PATH="$RUN_DIR/commands.sh"
@@ -23,32 +31,47 @@ run_command() {
 }
 
 printf 'run_dir=%s\n' "$RUN_DIR"
-printf 'config=%s\n' "$CONFIG_PATH"
+printf 'config=%s\n' "$CONFIG_LABEL"
 run_command bash scripts/env_check.sh
-git rev-parse HEAD > "$RUN_DIR/git-commit.txt"
-git status --short > "$RUN_DIR/git-status.txt"
-if ! timeout 30 nvidia-smi > "$RUN_DIR/nvidia-smi.txt"; then
+
+if [[ "$RECORD_GIT" == "1" ]] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git rev-parse HEAD > "$RUN_DIR/git-commit.txt"
+    git status --short > "$RUN_DIR/git-status.txt"
+else
+    printf 'not-recorded\n' > "$RUN_DIR/git-commit.txt"
+    printf 'not-recorded\n' > "$RUN_DIR/git-status.txt"
+fi
+
+if ! timeout 30 nvidia-smi --query-gpu=index,name,driver_version,memory.total \
+        --format=csv,noheader > "$RUN_DIR/nvidia-smi.txt"; then
     printf 'nvidia-smi timed out or failed\n' >> "$RUN_DIR/nvidia-smi.txt"
 fi
+
 "$PYTHON" - <<'PY' > "$RUN_DIR/environment.txt"
 import importlib.metadata
 import platform
 import sys
+
 import torch
 
-print(f"python={sys.version}")
-print(f"platform={platform.platform()}")
+# Coarse platform facts only: no node name, no kernel build string.
+print(f"python={sys.version.split()[0]}")
+print(f"platform={platform.system()}-{platform.machine()}")
 print(f"torch={torch.__version__}")
 print(f"torch_cuda={torch.version.cuda}")
 print(f"cuda_available={torch.cuda.is_available()}")
-print(f"gpu={torch.cuda.get_device_name(0)}")
+try:
+    print(f"gpu={torch.cuda.get_device_name(0)}")
+except Exception:
+    print("gpu=unavailable")
 for package in ("numpy", "PyYAML", "pytest", "coverage-repro"):
     try:
         print(f"{package}={importlib.metadata.version(package)}")
     except importlib.metadata.PackageNotFoundError:
         print(f"{package}=not-installed")
 PY
-"$PYTHON" - "$CONFIG_PATH" "$RUN_DIR/resolved-config.yaml" <<'PY'
+
+"$PYTHON" - "$CONFIG_INPUT" "$RUN_DIR/resolved-config.yaml" <<'PY'
 from pathlib import Path
 import sys
 import yaml
@@ -59,7 +82,7 @@ if not isinstance(config, dict):
 Path(sys.argv[2]).write_text(yaml.safe_dump(config, sort_keys=True))
 PY
 
-COMMAND_ENV="PYTHONPATH=$PROJECT_DIR${PYTHONPATH:+:$PYTHONPATH}"
+COMMAND_ENV="PYTHONPATH=."
 run_command env "$COMMAND_ENV" "$PYTHON" -m coverage_repro.cli build-dataset \
     --config "$RUN_DIR/resolved-config.yaml" --output "$RUN_DIR/dataset"
 "$PYTHON" - "$RUN_DIR/dataset/manifest.json" "$RUN_DIR/data_hashes.json" <<'PY'
